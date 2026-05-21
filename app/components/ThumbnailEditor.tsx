@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useEffect, useCallback } from "react";
+import { useHistory } from "@/app/hooks/useHistory";
 import {
   CANVAS_WIDTH,
   CANVAS_HEIGHT,
@@ -13,7 +14,6 @@ import {
 } from "@/app/lib/thumbnail";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -31,6 +31,8 @@ import {
   RiZoomInLine,
   RiZoomOutLine,
   RiResetLeftLine,
+  RiArrowGoBackLine,
+  RiArrowGoForwardLine,
 } from "@remixicon/react";
 import { getCachedImage, preloadImage } from "@/app/lib/image-cache";
 
@@ -61,9 +63,44 @@ type GuideState = {
 export default function ThumbnailEditor() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [elements, setElements] = useState<CanvasElement[]>([]);
+  const {
+    present,
+    set,
+    commit,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useHistory<{ elements: CanvasElement[]; backgroundColor: string }>({
+    elements: [],
+    backgroundColor: "#ffffff",
+  });
+
+  const elements = present.elements;
+  const backgroundColor = present.backgroundColor;
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+
+  const setElements = useCallback(
+    (updater: React.SetStateAction<CanvasElement[]>) => {
+      set((prev) => ({
+        ...prev,
+        elements:
+          typeof updater === "function"
+            ? (updater as (prev: CanvasElement[]) => CanvasElement[])(
+                prev.elements
+              )
+            : updater,
+      }));
+    },
+    [set]
+  );
+
+  const setBackgroundColor = useCallback(
+    (value: string) => {
+      set((prev) => ({ ...prev, backgroundColor: value }));
+    },
+    [set]
+  );
   const [dragState, setDragState] = useState<DragState>(null);
   const [resizeState, setResizeState] = useState<ResizeState>(null);
   const [scale, setScale] = useState(1);
@@ -213,10 +250,12 @@ export default function ThumbnailEditor() {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed.elements) && parsed.elements.length > 0) {
-          setElements(parsed.elements);
+          set((prev) => ({ ...prev, elements: parsed.elements }));
           loaded = true;
         }
-        if (parsed.backgroundColor) setBackgroundColor(parsed.backgroundColor);
+        if (parsed.backgroundColor) {
+          set((prev) => ({ ...prev, backgroundColor: parsed.backgroundColor }));
+        }
       } catch {
         // ignore parse errors
       }
@@ -231,7 +270,7 @@ export default function ThumbnailEditor() {
         height: 120,
         color: "#111111",
       });
-      setElements([el]);
+      set((prev) => ({ ...prev, elements: [el] }));
     }
   }, []);
 
@@ -248,6 +287,7 @@ export default function ThumbnailEditor() {
 
       if (clicked) {
         setSelectedId(clicked.id);
+        commit();
 
         const handle = getResizeHandle(pt.x, pt.y, clicked);
         if (handle) {
@@ -371,24 +411,49 @@ export default function ThumbnailEditor() {
 
   const handleDelete = useCallback(() => {
     if (!selectedId) return;
+    commit();
     setElements((prev) => prev.filter((el) => el.id !== selectedId));
     setSelectedId(null);
-  }, [selectedId]);
+  }, [selectedId, commit, setElements]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
-        const tag = document.activeElement?.tagName;
-        if (tag !== "INPUT" && tag !== "TEXTAREA") {
-          handleDelete();
-        }
+      const tag = document.activeElement?.tagName;
+      const isEditing =
+        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        selectedId &&
+        !isEditing
+      ) {
+        handleDelete();
+      }
+
+      if (
+        !isEditing &&
+        (e.metaKey || e.ctrlKey) &&
+        e.key === "z" &&
+        !e.shiftKey
+      ) {
+        e.preventDefault();
+        undo();
+      }
+      if (
+        !isEditing &&
+        (e.metaKey || e.ctrlKey) &&
+        ((e.key === "z" && e.shiftKey) || e.key === "y")
+      ) {
+        e.preventDefault();
+        redo();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedId, handleDelete]);
+  }, [selectedId, handleDelete, undo, redo]);
 
   const addText = () => {
+    commit();
     const el = createTextElement();
     setElements((prev) => [...prev, el]);
     setSelectedId(el.id);
@@ -416,6 +481,7 @@ export default function ThumbnailEditor() {
           x: CANVAS_WIDTH / 2 - w / 2,
           y: CANVAS_HEIGHT / 2 - h / 2,
         });
+        commit();
         setElements((prev) => [...prev, el]);
         setSelectedId(el.id);
       };
@@ -435,6 +501,7 @@ export default function ThumbnailEditor() {
   };
 
   const moveLayer = (id: string, direction: "up" | "down") => {
+    commit();
     setElements((prev) => {
       const idx = prev.findIndex((el) => el.id === id);
       if (idx === -1) return prev;
@@ -453,6 +520,7 @@ export default function ThumbnailEditor() {
   };
 
   const bringToFront = (id: string) => {
+    commit();
     setElements((prev) => {
       const el = prev.find((e) => e.id === id);
       if (!el) return prev;
@@ -461,6 +529,7 @@ export default function ThumbnailEditor() {
   };
 
   const sendToBack = (id: string) => {
+    commit();
     setElements((prev) => {
       const el = prev.find((e) => e.id === id);
       if (!el) return prev;
@@ -534,11 +603,13 @@ export default function ThumbnailEditor() {
               <input
                 type="color"
                 value={backgroundColor}
+                onFocus={() => commit()}
                 onChange={(e) => setBackgroundColor(e.target.value)}
                 className="w-8 h-8 rounded border-0 p-0 bg-transparent cursor-pointer"
               />
               <Input
                 value={backgroundColor}
+                onFocus={() => commit()}
                 onChange={(e) => setBackgroundColor(e.target.value)}
                 className="flex-1 h-8 bg-[#1a1a1a] border-[#2a2a2a] text-xs text-[#ccc]"
               />
@@ -633,6 +704,26 @@ export default function ThumbnailEditor() {
                 <RiZoomInLine className="w-3.5 h-3.5" />
               </Button>
             </div>
+            <div className="flex items-center gap-0.5">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={undo}
+                disabled={!canUndo}
+                className="h-7 w-7 p-0 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#ccc] disabled:opacity-30"
+              >
+                <RiArrowGoBackLine className="w-3.5 h-3.5" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={redo}
+                disabled={!canRedo}
+                className="h-7 w-7 p-0 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#ccc] disabled:opacity-30"
+              >
+                <RiArrowGoForwardLine className="w-3.5 h-3.5" />
+              </Button>
+            </div>
             <span className="text-xs font-medium tracking-widest uppercase text-[#888]">
               {elements.length} element{elements.length !== 1 ? "s" : ""}
             </span>
@@ -701,6 +792,7 @@ export default function ThumbnailEditor() {
                     <Input
                       type="number"
                       value={Math.round(selectedElement.x)}
+                      onFocus={() => commit()}
                       onChange={(e) =>
                         updateElement(selectedElement.id, {
                           x: Number(e.target.value),
@@ -714,6 +806,7 @@ export default function ThumbnailEditor() {
                     <Input
                       type="number"
                       value={Math.round(selectedElement.y)}
+                      onFocus={() => commit()}
                       onChange={(e) =>
                         updateElement(selectedElement.id, {
                           y: Number(e.target.value),
@@ -727,6 +820,7 @@ export default function ThumbnailEditor() {
                     <Input
                       type="number"
                       value={Math.round(selectedElement.width)}
+                      onFocus={() => commit()}
                       onChange={(e) =>
                         updateElement(selectedElement.id, {
                           width: Number(e.target.value),
@@ -740,6 +834,7 @@ export default function ThumbnailEditor() {
                     <Input
                       type="number"
                       value={Math.round(selectedElement.height)}
+                      onFocus={() => commit()}
                       onChange={(e) =>
                         updateElement(selectedElement.id, {
                           height: Number(e.target.value),
@@ -762,7 +857,10 @@ export default function ThumbnailEditor() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => sendToBack(selectedElement.id)}
+                    onClick={() => {
+                      commit();
+                      sendToBack(selectedElement.id);
+                    }}
                     className="flex-1 h-7 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#888] text-[10px]"
                   >
                     <RiSendToBack className="w-3 h-3 mr-1" />
@@ -771,7 +869,10 @@ export default function ThumbnailEditor() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => moveLayer(selectedElement.id, "down")}
+                    onClick={() => {
+                      commit();
+                      moveLayer(selectedElement.id, "down");
+                    }}
                     className="flex-1 h-7 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#888] text-[10px]"
                   >
                     <RiArrowDownLine className="w-3 h-3" />
@@ -779,7 +880,10 @@ export default function ThumbnailEditor() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => moveLayer(selectedElement.id, "up")}
+                    onClick={() => {
+                      commit();
+                      moveLayer(selectedElement.id, "up");
+                    }}
                     className="flex-1 h-7 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#888] text-[10px]"
                   >
                     <RiArrowUpLine className="w-3 h-3" />
@@ -787,7 +891,10 @@ export default function ThumbnailEditor() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => bringToFront(selectedElement.id)}
+                    onClick={() => {
+                      commit();
+                      bringToFront(selectedElement.id);
+                    }}
                     className="flex-1 h-7 border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#252525] text-[#888] text-[10px]"
                   >
                     <RiBringToFront className="w-3 h-3 mr-1" />
@@ -805,6 +912,7 @@ export default function ThumbnailEditor() {
                   onChange={(updates) =>
                     updateElement<TextElement>(selectedElement.id, updates)
                   }
+                  commit={commit}
                 />
               )}
               {selectedElement.type === "image" && (
@@ -813,6 +921,7 @@ export default function ThumbnailEditor() {
                   onChange={(updates) =>
                     updateElement<ImageElement>(selectedElement.id, updates)
                   }
+                  commit={commit}
                 />
               )}
 
@@ -838,9 +947,11 @@ export default function ThumbnailEditor() {
 function TextProperties({
   element,
   onChange,
+  commit,
 }: {
   element: TextElement;
   onChange: (u: Partial<TextElement>) => void;
+  commit: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -850,40 +961,39 @@ function TextProperties({
         </Label>
         <textarea
           value={element.content}
+          onFocus={() => commit()}
           onChange={(e) => onChange({ content: e.target.value })}
           rows={3}
           className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-md px-2.5 py-1.5 text-[11px] text-[#ccc] resize-none focus:outline-none focus:ring-1 focus:ring-[#d4a373]/30"
         />
       </div>
 
-      <div className="space-y-1">
-        <div className="flex justify-between">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
           <Label className="text-[9px] text-[#555]">Font Size</Label>
-          <span className="text-[9px] text-[#666]">{element.fontSize}px</span>
+          <Input
+            type="number"
+            min={8}
+            max={200}
+            value={element.fontSize}
+            onFocus={() => commit()}
+            onChange={(e) => onChange({ fontSize: Number(e.target.value) })}
+            className="h-7 bg-[#1a1a1a] border-[#2a2a2a] text-xs text-[#ccc]"
+          />
         </div>
-        <Slider
-          value={[element.fontSize]}
-          min={8}
-          max={200}
-          step={1}
-          onValueChange={([v]) => onChange({ fontSize: v })}
-          className="[&_[role=slider]]:bg-[#d4a373] [&_[role=slider]]:border-0 [&_[role=slider]]:w-3 [&_[role=slider]]:h-3 [&_.bg-primary]:bg-[#d4a373]/60 [&_[data-orientation=horizontal]]:h-1 [&_[data-orientation=horizontal]]:bg-[#2a2a2a]"
-        />
-      </div>
-
-      <div className="space-y-1">
-        <div className="flex justify-between">
+        <div className="space-y-1">
           <Label className="text-[9px] text-[#555]">Line Height</Label>
-          <span className="text-[9px] text-[#666]">{element.lineHeight.toFixed(1)}</span>
+          <Input
+            type="number"
+            min={0.8}
+            max={3}
+            step={0.1}
+            value={element.lineHeight}
+            onFocus={() => commit()}
+            onChange={(e) => onChange({ lineHeight: Number(e.target.value) })}
+            className="h-7 bg-[#1a1a1a] border-[#2a2a2a] text-xs text-[#ccc]"
+          />
         </div>
-        <Slider
-          value={[element.lineHeight]}
-          min={0.8}
-          max={3}
-          step={0.1}
-          onValueChange={([v]) => onChange({ lineHeight: v })}
-          className="[&_[role=slider]]:bg-[#d4a373] [&_[role=slider]]:border-0 [&_[role=slider]]:w-3 [&_[role=slider]]:h-3 [&_.bg-primary]:bg-[#d4a373]/60 [&_[data-orientation=horizontal]]:h-1 [&_[data-orientation=horizontal]]:bg-[#2a2a2a]"
-        />
       </div>
 
       <div className="grid grid-cols-2 gap-2">
@@ -893,11 +1003,13 @@ function TextProperties({
             <input
               type="color"
               value={element.color}
+              onFocus={() => commit()}
               onChange={(e) => onChange({ color: e.target.value })}
               className="w-6 h-6 rounded border-0 p-0 bg-transparent cursor-pointer shrink-0"
             />
             <Input
               value={element.color}
+              onFocus={() => commit()}
               onChange={(e) => onChange({ color: e.target.value })}
               className="h-6 bg-[#1a1a1a] border-[#2a2a2a] text-[10px] text-[#ccc] px-1.5"
             />
@@ -909,11 +1021,13 @@ function TextProperties({
             <input
               type="color"
               value={element.backgroundColor === "transparent" ? "#000000" : element.backgroundColor}
+              onFocus={() => commit()}
               onChange={(e) => onChange({ backgroundColor: e.target.value })}
               className="w-6 h-6 rounded border-0 p-0 bg-transparent cursor-pointer shrink-0"
             />
             <Input
               value={element.backgroundColor}
+              onFocus={() => commit()}
               onChange={(e) => onChange({ backgroundColor: e.target.value })}
               className="h-6 bg-[#1a1a1a] border-[#2a2a2a] text-[10px] text-[#ccc] px-1.5"
             />
@@ -927,7 +1041,10 @@ function TextProperties({
           {(["left", "center", "right"] as const).map((align) => (
             <button
               key={align}
-              onClick={() => onChange({ align })}
+              onClick={() => {
+                commit();
+                onChange({ align });
+              }}
               className={`flex-1 py-1 text-[10px] rounded border transition-colors ${
                 element.align === align
                   ? "bg-[#d4a373]/10 border-[#d4a373]/30 text-[#d4a373]"
@@ -948,9 +1065,11 @@ function TextProperties({
 function ImageProperties({
   element,
   onChange,
+  commit,
 }: {
   element: ImageElement;
   onChange: (u: Partial<ImageElement>) => void;
+  commit: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -962,7 +1081,10 @@ function ImageProperties({
           {(["cover", "contain", "fill"] as const).map((fit) => (
             <button
               key={fit}
-              onClick={() => onChange({ objectFit: fit })}
+              onClick={() => {
+                commit();
+                onChange({ objectFit: fit });
+              }}
               className={`flex-1 py-1 text-[10px] rounded border transition-colors ${
                 element.objectFit === fit
                   ? "bg-[#d4a373]/10 border-[#d4a373]/30 text-[#d4a373]"
@@ -981,28 +1103,84 @@ function ImageProperties({
 /* Canvas Drawing Helpers */
 
 function drawTextElement(ctx: CanvasRenderingContext2D, el: TextElement) {
-  const lines = wrapText(ctx, el.content, el.width, el.fontSize);
-  const lineH = el.fontSize * el.lineHeight;
+  // Auto-shrink font so all text fits inside the box, capped at the user-set fontSize
+  const fontSize = computeFitFontSize(
+    ctx,
+    el.content,
+    el.width,
+    el.height,
+    el.fontSize,
+    el.lineHeight
+  );
+
+  const lines = wrapText(ctx, el.content, el.width, fontSize);
+  const lineH = fontSize * el.lineHeight;
   const totalH = lines.length * lineH;
-  const startY = (el.height - totalH) / 2 + lineH * 0.8;
 
   if (el.backgroundColor && el.backgroundColor !== "transparent") {
     ctx.fillStyle = el.backgroundColor;
     ctx.fillRect(0, 0, el.width, el.height);
   }
 
-  ctx.font = `${el.fontSize}px "JetBrains Mono", monospace`;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, el.width, el.height);
+  ctx.clip();
+
+  ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
   ctx.fillStyle = el.color;
   ctx.textAlign = el.align;
-  ctx.textBaseline = "alphabetic";
+  ctx.textBaseline = "middle";
 
   let x = el.width / 2;
   if (el.align === "left") x = 0;
   if (el.align === "right") x = el.width;
 
+  const startY = (el.height - totalH) / 2 + lineH / 2;
+
   for (let i = 0; i < lines.length; i++) {
     ctx.fillText(lines[i], x, startY + i * lineH);
   }
+  ctx.restore();
+}
+
+function computeFitFontSize(
+  ctx: CanvasRenderingContext2D,
+  content: string,
+  maxWidth: number,
+  maxHeight: number,
+  preferredSize: number,
+  lineHeight: number
+): number {
+  let low = 4;
+  let high = preferredSize;
+  let best = 4;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const lines = wrapText(ctx, content, maxWidth, mid);
+    const lineH = mid * lineHeight;
+    const totalH = lines.length * lineH;
+
+    let fits = totalH <= maxHeight;
+    if (fits) {
+      for (const line of lines) {
+        if (ctx.measureText(line).width > maxWidth + 0.5) {
+          fits = false;
+          break;
+        }
+      }
+    }
+
+    if (fits) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best;
 }
 
 function wrapText(
